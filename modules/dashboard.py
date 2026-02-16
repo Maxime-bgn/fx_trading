@@ -1,97 +1,37 @@
-"""
-Module 1 — Main Dashboard
-Integrates backtest from portfolio_pi²_(2).py
-Technical-Functional Report - Section 2.1.1
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import cvxpy as cp
+import sys
+from pathlib import Path
+import importlib.util
 
-TRADING_DAYS = 252
-WINDOW = 60
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Import module with non-standard name using importlib (portfolio_pi²_(2).py)
+portfolio_module_path = Path(__file__).parent.parent / "portfolio_pi²_(2).py"
+spec = importlib.util.spec_from_file_location("portfolio_module", portfolio_module_path)
+portfolio_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(portfolio_module)
+
+# Get functions and constants from the portfolio_pi²_(2) module
+solve_min_variance = portfolio_module.solve_min_variance
+solve_max_sharpe = portfolio_module.solve_max_sharpe
+run_backtest = portfolio_module.run_backtest
+TRADING_DAYS = portfolio_module.TRADING_DAYS
+WINDOW = portfolio_module.WINDOW
+
+# Import from portfolio_utils.py (colleagues' work from returns.py and risque.py)
+from portfolio_utils import (
+    load_fx_returns,
+    compute_risk_metrics,
+    max_drawdown_signed,
+    max_drawdown_positive
+)
+
+# Define CAP locally (default value used in source module)
 CAP = 0.20
-
-def solve_min_variance(mu, Sigma, cap=CAP, eps=1e-4):
-    """Minimizes portfolio variance."""
-    n = len(mu)
-    Sigma_psd = Sigma + eps * np.eye(n)
-    w = cp.Variable(n)
-    prob = cp.Problem(
-        cp.Minimize(cp.quad_form(w, Sigma_psd)),
-        [cp.sum(w) == 1, w >= 0, w <= cap]
-    )
-    try:
-        prob.solve(solver=cp.SCS, verbose=False)
-        return np.maximum(w.value, 0)
-    except:
-        return np.ones(n) / n
-
-
-def solve_max_sharpe(mu, Sigma, cap=CAP, eps=1e-4):
-    """Maximizes the portfolio Sharpe ratio."""
-    n = len(mu)
-    if np.max(mu) < 0:
-        return solve_min_variance(mu, Sigma, cap, eps)
-    Sigma_psd = Sigma + eps * np.eye(n)
-    y = cp.Variable(n)
-    k = cp.Variable()
-    prob = cp.Problem(
-        cp.Maximize(mu @ y),
-        [cp.quad_form(y, Sigma_psd) <= 1,
-         cp.sum(y) == k, y >= 0, k >= 0, y <= cap * k]
-    )
-    try:
-        prob.solve(solver=cp.SCS, verbose=False)
-        if k.value is None or k.value < 1e-6:
-            return np.ones(n) / n
-        return np.maximum(y.value / k.value, 0)
-    except:
-        return np.ones(n) / n
-
-
-def run_backtest(returns_df, strategy_fn):
-    """Backtest engine with monthly rebalancing."""
-    rebal_dates = returns_df.resample("MS").first().index
-    portfolio_daily_returns = []
-    start_idx = 0
-
-    for i, date in enumerate(rebal_dates):
-        if len(returns_df.loc[:date]) >= WINDOW:
-            start_idx = i
-            break
-
-    current_weights = np.ones(returns_df.shape[1]) / returns_df.shape[1]
-
-    for i in range(start_idx, len(rebal_dates)):
-        curr_date = rebal_dates[i]
-        next_date = (rebal_dates[i + 1]
-                     if i < len(rebal_dates) - 1
-                     else returns_df.index[-1])
-
-        hist_data = returns_df.loc[:curr_date].iloc[-WINDOW:]
-        mu    = hist_data.mean().values * TRADING_DAYS
-        Sigma = hist_data.cov().values  * TRADING_DAYS
-
-        try:
-            w = strategy_fn(mu, Sigma)
-            if np.sum(w) > 0:
-                w = w / np.sum(w)
-        except:
-            w = current_weights
-
-        current_weights = w
-        mask = ((returns_df.index > curr_date) &
-                (returns_df.index <= next_date))
-        period = returns_df.loc[mask]
-        if period.empty:
-            continue
-        portfolio_daily_returns.append(period.dot(w))
-
-    return pd.concat(portfolio_daily_returns)
-
 
 def get_metrics(r):
     """Computes performance metrics from a return series."""
@@ -113,12 +53,11 @@ def get_metrics(r):
 
 @st.cache_data
 def load_returns():
-    """Loads fx_returns.csv."""
-    try:
-        return pd.read_csv("fx_returns.csv", sep=";", decimal=",",
-                           index_col=0, parse_dates=True).dropna(how="any")
-    except Exception:
-        return None
+    """Loads fx_returns.csv using portfolio_utils function."""
+    returns_df = load_fx_returns()
+    if returns_df is not None:
+        return returns_df.dropna(how="any")
+    return None
 
 
 @st.cache_data
@@ -137,8 +76,10 @@ def compute_backtests(returns_hash):
     returns_df = load_returns()
     if returns_df is None:
         return None, None
-    ret_mv = run_backtest(returns_df, solve_min_variance)
-    ret_ms = run_backtest(returns_df, solve_max_sharpe)
+    
+    # Use functions from colleagues' module
+    ret_mv = run_backtest(returns_df, solve_min_variance, window=WINDOW, cap=CAP)
+    ret_ms = run_backtest(returns_df, solve_max_sharpe, window=WINDOW, cap=CAP)
     return ret_mv, ret_ms
 
 
